@@ -117,15 +117,6 @@ function createScopes(config, payload) {
  *  }
  **/
 module.exports.setup = async function({cfg, schemaset}) {
-  let slugids = {};
-  let as_slugid = (label) => {
-    let rv;
-    if (rv = slugids[label]) {
-      return rv;
-    } else {
-      return slugids[label] = slugid.nice();
-    }
-  };
   const validate = await schemaset.validator(cfg.taskcluster.rootUrl);
 
   return function({config, payload, schema}) {
@@ -140,7 +131,7 @@ module.exports.setup = async function({cfg, schemaset}) {
       }
     };
     let version = config.version;
-    
+
     let errors;
     if (version == 0) {
       errors = validate(config, schema);
@@ -175,11 +166,20 @@ module.exports.setup = async function({cfg, schemaset}) {
       if (!branchTest.test(payload.branch || '')) {
         throw new Error('Cannot have unicode in branch names!');
       }
-      config = jsone(config, {
-        tasks_for: payload.tasks_for,
-        event: payload.body,
-        as_slugid,
-      });
+      try {
+        config = jsone(config, {
+          tasks_for: payload.tasks_for,
+          event: payload.body,
+          as_slugid,
+        });
+      } catch (err) {
+        // json-e creates errors that have properties in a format
+        // that taskcluster-github messes up. Just fixing it here.
+        if (err.toString && err.location) {
+          throw new Error(err.toString());
+        }
+        throw err;
+      }
     }
 
     // Compile individual tasks, filtering any that are not intended
@@ -198,26 +198,26 @@ module.exports.setup = async function({cfg, schemaset}) {
           if (!task.task.extra || !task.task.extra.github) {
             return false;
           }
-  
+
           let event = payload.details['event.type'];
           let events = task.task.extra.github.events;
           let branch = payload.details['event.base.repo.branch'];
           let includeBranches = task.task.extra.github.branches;
           let excludeBranches = task.task.extra.github.excludeBranches;
-  
+
           if (includeBranches && excludeBranches) {
             throw new Error('Cannot specify both `branches` and `excludeBranches` in the same task!');
           }
-  
+
           return _.some(events, ev => { // TODO
             if (!event.startsWith(_.trimEnd(ev, '*'))) {
               return false;
             }
-  
+
             if (event !== 'push') {
               return true;
             }
-  
+
             if (includeBranches) {
               return _.includes(includeBranches, branch);
             } else if (excludeBranches) {
@@ -227,7 +227,7 @@ module.exports.setup = async function({cfg, schemaset}) {
             }
           });
         });
-  
+
         // Add common taskGroupId and schedulerId. taskGroupId is always the taskId of the first
         // task in taskcluster.
         if (config.tasks.length > 0) {
@@ -241,13 +241,21 @@ module.exports.setup = async function({cfg, schemaset}) {
         }
         return completeInTreeConfig(config, payload);
       } else {
-        
+
         if (config.tasks.length > 0) {
+          const groupId = slugid.nice();
           config.tasks = config.tasks.map((task) => {
-            if (!task.taskId) { throw Error('The taskId is absent.'); }
+            if (!task.taskId) {
+              throw Error(
+                `The taskId is absent:\n\`\`\`json\n${JSON.stringify(task, null, 2)}\n\`\`\``
+              );
+            }
             return {
               taskId: task.taskId,
-              task: _.extend(task, {schedulerId: cfg.taskcluster.schedulerId}),
+              task: _.omit(_.extend(task, {
+                schedulerId: cfg.taskcluster.schedulerId,
+                taskGroupId: task.taskGroupId || groupId,
+              }), 'taskId'),
             };
           });
         }
